@@ -87,6 +87,20 @@ jobs:
             echo "Downloading $fname ..."
             curl -fSL --retry 5 --retry-delay 3 -o "libs/$fname" "$u"
           done
+
+          # Extract any jar-in-jar (NeoForge JarJar) bundles so the compiler can see
+          # transitive APIs like Sable's companion module and Veil.
+          echo "── Extracting nested JarJar entries ──"
+          mkdir -p libs/_nested
+          for jar in libs/*.jar; do
+            unzip -q -o -j "$jar" 'META-INF/jarjar/*.jar' -d libs/_nested 2>/dev/null || true
+          done
+          if compgen -G "libs/_nested/*.jar" > /dev/null; then
+            mv libs/_nested/*.jar libs/
+            echo "Pulled out nested jars."
+          fi
+          rmdir libs/_nested 2>/dev/null || true
+
           echo "── libs/ contents ──"
           ls -la libs
 
