@@ -1,0 +1,136 @@
+name: Build Mod
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Extract source zip (if present)
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' | head -n 1)"
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found source zip: $ZIP_FILE"
+            mkdir -p _extracted
+            unzip -q -o "$ZIP_FILE" -d _extracted
+            echo "Extracted contents:"
+            ls -la _extracted
+          else
+            echo "No zip found in repo root - assuming source is already extracted."
+          fi
+
+      - name: Detect mod directory
+        id: detect
+        shell: bash
+        run: |
+          set -e
+          MOD_DIR=""
+          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            MOD_DIR="."
+          else
+            MOD_DIR="$(find . -maxdepth 5 -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -not -path '*/build/*' -not -path '*/.gradle/*' -not -path '*/buildSrc/*' | head -n 1 | xargs -r dirname)"
+          fi
+          if [ -z "$MOD_DIR" ]; then
+            echo "ERROR: build.gradle not found anywhere in the repo." >&2
+            exit 1
+          fi
+          echo "Mod directory: $MOD_DIR"
+          echo "mod_dir=$MOD_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Read mod metadata
+        id: meta
+        shell: bash
+        working-directory: ${{ steps.detect.outputs.mod_dir }}
+        run: |
+          set -e
+          MOD_ID=""
+          MOD_VERSION=""
+          if [ -f "gradle.properties" ]; then
+            MOD_ID="$(grep -E '^\s*mod_id\s*=' gradle.properties | head -n1 | sed -E 's/^\s*mod_id\s*=\s*//' | tr -d '\r' | xargs)"
+            MOD_VERSION="$(grep -E '^\s*mod_version\s*=' gradle.properties | head -n1 | sed -E 's/^\s*mod_version\s*=\s*//' | tr -d '\r' | xargs)"
+          fi
+          [ -z "$MOD_ID" ] && MOD_ID="mod"
+          [ -z "$MOD_VERSION" ] && MOD_VERSION="1.0.0"
+          echo "mod_id=$MOD_ID"
+          echo "mod_version=$MOD_VERSION"
+          echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
+          echo "mod_version=$MOD_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Gradle wrapper exists
+        shell: bash
+        working-directory: ${{ steps.detect.outputs.mod_dir }}
+        run: |
+          set -e
+          if [ ! -f "gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "Gradle wrapper missing - generating wrapper..."
+            GRADLE_VERSION=8.8
+            if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+              DETECTED=$(grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?' gradle/wrapper/gradle-wrapper.properties | head -n1 | sed 's/gradle-//')
+              if [ -n "$DETECTED" ]; then GRADLE_VERSION="$DETECTED"; fi
+            fi
+            echo "Using Gradle $GRADLE_VERSION"
+            curl -sSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp/gradle-dist
+            "/tmp/gradle-dist/gradle-${GRADLE_VERSION}/bin/gradle" wrapper --gradle-version "${GRADLE_VERSION}"
+          fi
+          chmod +x gradlew
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build with Gradle
+        working-directory: ${{ steps.detect.outputs.mod_dir }}
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Collect final JAR
+        id: collect
+        shell: bash
+        run: |
+          set -e
+          MOD_DIR="${{ steps.detect.outputs.mod_dir }}"
+          MOD_ID="${{ steps.meta.outputs.mod_id }}"
+          MOD_VERSION="${{ steps.meta.outputs.mod_version }}"
+          mkdir -p output
+          JAR=""
+          for f in "$MOD_DIR"/build/libs/*.jar; do
+            case "$f" in
+              *-sources.jar|*-dev.jar|*-javadoc.jar|*-slim.jar) continue ;;
+            esac
+            JAR="$f"
+            break
+          done
+          if [ -z "$JAR" ]; then
+            echo "ERROR: No build output JAR found in $MOD_DIR/build/libs/" >&2
+            ls -la "$MOD_DIR/build/libs/" || true
+            exit 1
+          fi
+          FINAL="output/${MOD_ID}-${MOD_VERSION}.jar"
+          cp "$JAR" "$FINAL"
+          echo "Final JAR: $FINAL"
+          ls -la output
+          echo "artifact_name=${MOD_ID}-${MOD_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload final mod JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.artifact_name }}
+          path: output/*.jar
+          if-no-files-found: error
+          retention-days: 30
