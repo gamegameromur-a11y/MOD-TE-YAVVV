@@ -1,11 +1,15 @@
-name: Build Mod
+   name: Build Mod
 
 on:
   push:
     branches: [ "**" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "**" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -218,10 +222,33 @@ jobs:
           ls -la output
           echo "artifact_name=${MOD_ID}-${MOD_VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload final mod JAR
+      - name: Upload final mod JAR (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.collect.outputs.artifact_name }}
           path: output/*.jar
           if-no-files-found: error
           retention-days: 30
+
+      - name: Determine release tag
+        id: tag
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        shell: bash
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "push" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v${{ steps.meta.outputs.mod_version }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to GitHub Release
+        if: steps.tag.outputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.meta.outputs.mod_id }} ${{ steps.meta.outputs.mod_version }}
+          files: output/*.jar
+          generate_release_notes: true
+          fail_on_unmatched_files: true
