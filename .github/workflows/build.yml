@@ -73,6 +73,46 @@ jobs:
           echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
           echo "mod_version=$MOD_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Patch build.gradle (replace dead hlysine maven with Modrinth)
+        shell: bash
+        working-directory: ${{ steps.detect.outputs.mod_dir }}
+        run: |
+          set -e
+          BG="build.gradle"
+          [ -f "build.gradle.kts" ] && BG="build.gradle.kts"
+          if [ ! -f "$BG" ]; then
+            echo "No build.gradle to patch."
+            exit 0
+          fi
+
+          echo "Original repositories/deps that mention hlysine:"
+          grep -n "hlysine" "$BG" || true
+
+          # 1) Rewrite the hlysine maven URL to Modrinth (safe even if URL already gone).
+          sed -i 's|https://maven.hlysine.com/releases|https://api.modrinth.com/maven|g' "$BG"
+
+          # 2) Rewrite create_connected coordinate from com.hlysine -> maven.modrinth slug.
+          # Handles both: com.hlysine:create_connected:VER:slim  and  com.hlysine:create_connected:VER
+          python3 - "$BG" <<'PY'
+          import re, sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          s = p.read_text()
+          # com.hlysine:create_connected:<ver>[:<classifier>]  -> maven.modrinth:create-connected:<ver>
+          s2 = re.sub(
+              r'com\.hlysine:create_connected:([^"\':\s)]+)(?::[A-Za-z0-9_-]+)?',
+              r'maven.modrinth:create-connected:\1',
+              s,
+          )
+          if s2 != s:
+              p.write_text(s2)
+              print("Patched create_connected coordinate -> maven.modrinth:create-connected")
+          else:
+              print("No create_connected coordinate change needed.")
+          PY
+
+          echo "After patch:"
+          grep -nE "modrinth|hlysine|create_connected|create-connected" "$BG" || true
+
       - name: Ensure Gradle wrapper exists
         shell: bash
         working-directory: ${{ steps.detect.outputs.mod_dir }}
